@@ -1,1 +1,5 @@
 wd.get("https://www.netice9.com")
+wd.setTimeout(0.3)
+const link = wd.findElement("#sapper > div > nav > ul > li:nth-child(2) > a")
+link.click()
+wd.findElement("#sapper > div > main > article > ul > li:nth-child(1) > a").click()
