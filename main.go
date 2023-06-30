@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/dop251/goja"
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -26,41 +30,79 @@ func main() {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			caps := selenium.Capabilities{}
-			caps.AddChrome(chrome.Capabilities{})
-			wd, err := selenium.NewRemote(caps, "http://localhost:9515")
-			if err != nil {
-				return fmt.Errorf("could not start web driver: %w", err)
-			}
 
-			wd.SetImplicitWaitTimeout(c.Duration("default-timeout"))
+			eg, ctx := errgroup.WithContext(context.Background())
 
-			defer wd.Close()
+			eg.Go(func() error {
 
-			rt := goja.New()
-			rt.SetFieldNameMapper(goja.TagFieldNameMapper("goja", true))
+				defer func() {
+					x := recover()
+					if x != nil {
+						fmt.Println(x)
+					}
+					fmt.Println("defer done")
+				}()
 
-			scriptName := c.String("script")
-			scb, err := os.ReadFile(scriptName)
-			if err != nil {
-				return fmt.Errorf("could not read script %s: %w", scriptName, err)
-			}
+				caps := selenium.Capabilities{}
+				caps.AddChrome(chrome.Capabilities{})
+				wd, err := selenium.NewRemote(ctx, caps, "http://localhost:9515")
+				if err != nil {
+					return fmt.Errorf("could not start web driver: %w", err)
+				}
 
-			err = rt.GlobalObject().Set("wd", &WDWrapper{wd: wd})
-			if err != nil {
-				return fmt.Errorf("could not set wd global: %w", err)
-			}
+				wd.SetImplicitWaitTimeout(c.Duration("default-timeout"))
 
-			rt.GlobalObject().Set("println", fmt.Println)
+				defer wd.Quit()
 
-			_, err = rt.RunScript(scriptName, string(scb))
-			if err != nil {
-				return fmt.Errorf("script failed: %w", err)
-			}
+				rt := goja.New()
+				rt.SetFieldNameMapper(goja.TagFieldNameMapper("goja", true))
 
-			fmt.Println("script done")
-			time.Sleep(20 * time.Second)
-			return nil
+				scriptName := c.String("script")
+				scb, err := os.ReadFile(scriptName)
+				if err != nil {
+					return fmt.Errorf("could not read script %s: %w", scriptName, err)
+				}
+
+				err = rt.GlobalObject().Set("wd", &WDWrapper{wd: wd})
+				if err != nil {
+					return fmt.Errorf("could not set wd global: %w", err)
+				}
+
+				rt.GlobalObject().Set("println", fmt.Println)
+
+				_, err = rt.RunScript(scriptName, string(scb))
+				if err != nil {
+					return fmt.Errorf("script failed: %w", err)
+				}
+				fmt.Println("script done")
+
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(30 * time.Second):
+					return nil
+				}
+			})
+
+			eg.Go(func() error {
+
+				sigs := make(chan os.Signal, 1)
+				signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case sig := <-sigs:
+					fmt.Println("signal received, terminating", "sig", sig)
+					return fmt.Errorf("signal %s received", sig.String())
+				}
+
+			})
+
+			defer func() {
+				time.Sleep(200 * time.Millisecond)
+			}()
+			return eg.Wait()
 		},
 	}
 	app.RunAndExitOnError()
@@ -87,6 +129,7 @@ func (w *WDWrapper) FindElement(selector string) (*ElementWrapper, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return &ElementWrapper{el}, nil
 }
 
